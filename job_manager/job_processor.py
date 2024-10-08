@@ -25,13 +25,16 @@ Whenever we send off a batch of data to the client, we modify a field "TO BE DEL
 If a client waits longer than 5 seconds to ping their web socket, the job is terminated and all entries are wiped from the database.
 '''
 
-from job_manager.db_manager import connect_db, get_job, add_results, create_table, remove_job, get_jobs
+from job_manager.db_manager import connect_db, get_job, add_results, create_table, remove_job, get_jobs, update_job
 from star_db_manager.db_manager import get_min_max_ids
 from computation_engine.main import worker
 import multiprocessing as mp
+import numpy as np
 import functools
 import json
 import time
+import os
+import ast
 
 # Connect to the job queue database
 flag, conn = connect_db('exosky')
@@ -74,38 +77,72 @@ while True:
 	for job_id in job_list:
 		# Timing the job execution
 		start = time.time()
-		print()
-		job_id, ip_addr, timestamp, params = get_job(conn, job_id)
+		job_id, ip_addr, timestamp, params, inprogress = get_job(_conn, job_id)
+
+		# Dont do jobs that are already taken by another job_processor instance
+		if inprogress == 1 or inprogress == 2:
+			continue
+
+		# If the job isn't taken yet, take it
+
+		# Set the job inprogress flag to true
+		update_job(conn, job_id, {"job_id": job_id, "ip_addr": ip_addr, "timestamp": timestamp, "parameters": params, "inprogress": 1})
 
 		params = json.loads(params)	
-
+		
+		print()
 		print("--------------------------------------------------")
 		print(f"Job ID: {job_id}")
 		print(f"Client IP Address: {ip_addr}")
 		print(f"Time requested: {timestamp}")
 		print(f"Parameters: {params}")
 
-		# Get the data from the database
-		with mp.Pool(n_workers) as pool:
-			# Each worker retrieves a batch of rows to process
-			for _, result in pool.imap(functools.partial(worker, batch_size=batch_size, params = params, job_id = job_id), batch_queue):
-				if _ == -1:
-					print(result)
-					break
+		# First check if the data is preloaded:
+		if os.path.exists(f"./job_manager/precomputed_results/{params['pl_name'].replace(" ", "_").lower()}.txt"):
+			# Read the file
+			print("Reading...")
+			with open(f"./job_manager/precomputed_results/{params['pl_name'].replace(" ", "_").lower()}.txt", "r") as f:
+				stars = f.readlines()
 
-				# Add to the results database
-				flag, status = add_results(conn, job_id, result)
+			flag, status = add_results(conn, job_id, [ast.literal_eval(x) for x in stars])
+			
+			# Check if it worked
+			if flag == -1:
+				print("Insert failed. ", status)
+				continue
+		else:
+			print("Calculating...")
+			# Get the data from the database
+			with mp.Pool(n_workers) as pool:
+				# Each worker retrieves a batch of rows to process
+				for _, result in pool.imap(functools.partial(worker, batch_size=batch_size, params = params, job_id = job_id), batch_queue):
+					if _ == -1:
+						print(result)
+						break
 
-				# Check if it worked
-				if flag == -1:
-					print("Insert failed. ", status)
-					continue
+					# Add to the results database
+					flag, status = add_results(conn, job_id, result)
 
+					# Check if it worked
+					if flag == -1:
+						print("Insert failed. ", status)
+						continue
+
+					# Add data to the precomputed_results file
+					with open(f"./job_manager/precomputed_results/{params['pl_name'].replace(" ", "_").lower()}.txt", "a") as f:
+						for star in result:
+							f.write(np.array2string(star,separator=",",max_line_width=10000).strip("\n")+"\n")
+		
+		'''
 		# Remove the job from the queue database
 		flag, status = remove_job(conn, job_id)
 		if flag == -1:
 			print("Could not remove job from queue. ", status)
 			continue
+		'''
+
+		# Set the job inprogress flag to 2 (completed)
+		update_job(conn, job_id, {"job_id": job_id, "ip_addr": ip_addr, "timestamp": timestamp, "parameters": params, "inprogress": 2})
 
 		print(f"Job Complete! ({job_id}) Took {(time.time()-start) * 100 // 100} Seconds")
 		print()

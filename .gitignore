@@ -160,3 +160,4 @@ cython_debug/
 #.idea/
 
 star_db_manager/credentials.py
+web_app/

@@ -29,6 +29,7 @@ def worker(start_id, batch_size, params, job_id):
 	#print(batch_size, len(rows),len(results))
 	if flag == -1:
 		return -1, results
+
 	# Return results
 	return 1, results
 
